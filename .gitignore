@@ -1,0 +1,19 @@
+# Build outputs
+**/bin/
+**/obj/
+
+# User settings
+*.user
+.vs/
+*.suo
+
+# Rider
+.idea/
+
+# Publish
+**/publish/
+
+# EF Core migration snapshots are committed, but not the DB file
+*.db
+*.db-shm
+*.db-wal
