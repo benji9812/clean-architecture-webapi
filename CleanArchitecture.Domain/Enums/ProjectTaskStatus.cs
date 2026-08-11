@@ -1,0 +1,9 @@
+namespace CleanArchitecture.Domain.Enums;
+
+public enum ProjectTaskStatus
+{
+    Todo = 0,
+    InProgress = 1,
+    Done = 2,
+    Cancelled = 3
+}
