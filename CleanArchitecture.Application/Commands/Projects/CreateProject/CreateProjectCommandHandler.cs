@@ -1,3 +1,4 @@
+using AutoMapper;
 using CleanArchitecture.Application.DTOs;
 using CleanArchitecture.Domain.Entities;
 using CleanArchitecture.Domain.Interfaces;
@@ -8,10 +9,12 @@ namespace CleanArchitecture.Application.Commands.Projects.CreateProject;
 public class CreateProjectCommandHandler : IRequestHandler<CreateProjectCommand, ProjectDto>
 {
     private readonly IProjectRepository _repository;
+    private readonly IMapper _mapper;
 
-    public CreateProjectCommandHandler(IProjectRepository repository)
+    public CreateProjectCommandHandler(IProjectRepository repository, IMapper mapper)
     {
         _repository = repository;
+        _mapper = mapper;
     }
 
     public async Task<ProjectDto> Handle(CreateProjectCommand request, CancellationToken cancellationToken)
@@ -25,7 +28,6 @@ public class CreateProjectCommandHandler : IRequestHandler<CreateProjectCommand,
         };
 
         var created = await _repository.AddAsync(project);
-
-        return new ProjectDto(created.Id, created.Name, created.Description, created.CreatedAt, 0);
+        return _mapper.Map<ProjectDto>(created);
     }
 }

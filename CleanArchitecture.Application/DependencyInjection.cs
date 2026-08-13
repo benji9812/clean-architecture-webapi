@@ -9,12 +9,22 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddApplication(this IServiceCollection services)
     {
+        // AutoMapper – pass the marker type; AutoMapper scans that assembly for Profiles
+        services.AddAutoMapper(typeof(AssemblyReference));
+
+        // MediatR – scans this assembly for all IRequestHandler<> implementations
         services.AddMediatR(cfg =>
             cfg.RegisterServicesFromAssembly(typeof(AssemblyReference).Assembly));
 
-        // Pipeline: Logging runs first, then Validation, then the Handler
-        services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
+        // Pipeline order matters: outer behavior runs first.
+        // ValidationBehavior is OUTER → invalid requests are rejected before
+        // they ever reach LoggingBehavior, so failed requests are never
+        // logged as "Handled".
+        //
+        //   Request → ValidationBehavior → LoggingBehavior → Handler
+        //              ↑ throws if invalid; Logging never reached
         services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+        services.AddTransient(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
 
         services.AddValidatorsFromAssembly(typeof(AssemblyReference).Assembly);
 
