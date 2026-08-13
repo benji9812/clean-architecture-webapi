@@ -71,12 +71,24 @@ HTTP Request
    }
    ```
 
-3. Run the API (migrations apply automatically on startup):
+3. Configure local secrets (required for login/JWT in development):
+   ```bash
+   dotnet user-secrets --project CleanArchitecture.API set "JwtSettings:SecretKey" "<min-32-char-random-string>"
+   dotnet user-secrets --project CleanArchitecture.API set "TestUsers:0:Username" "<admin-username>"
+   dotnet user-secrets --project CleanArchitecture.API set "TestUsers:0:Password" "<admin-password>"
+   dotnet user-secrets --project CleanArchitecture.API set "TestUsers:0:Role" "Admin"
+   dotnet user-secrets --project CleanArchitecture.API set "TestUsers:1:Username" "<user-username>"
+   dotnet user-secrets --project CleanArchitecture.API set "TestUsers:1:Password" "<user-password>"
+   dotnet user-secrets --project CleanArchitecture.API set "TestUsers:1:Role" "User"
+   ```
+   Example template: `CleanArchitecture.API/secrets.example.json`.
+
+4. Run the API (migrations apply automatically on startup):
    ```bash
    dotnet run --project CleanArchitecture.API
    ```
 
-4. Open Scalar at: **https://localhost:{port}/scalar/v1**
+5. Open Scalar at: **https://localhost:{port}/scalar/v1**
 
 ### Migrations (manual)
 

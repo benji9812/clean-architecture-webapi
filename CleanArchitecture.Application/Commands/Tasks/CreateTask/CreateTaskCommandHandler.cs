@@ -1,3 +1,4 @@
+using AutoMapper;
 using CleanArchitecture.Application.DTOs;
 using CleanArchitecture.Domain.Entities;
 using CleanArchitecture.Domain.Enums;
@@ -10,16 +11,21 @@ public class CreateTaskCommandHandler : IRequestHandler<CreateTaskCommand, TaskD
 {
     private readonly ITaskRepository _taskRepository;
     private readonly IProjectRepository _projectRepository;
+    private readonly IMapper _mapper;
 
-    public CreateTaskCommandHandler(ITaskRepository taskRepository, IProjectRepository projectRepository)
+    public CreateTaskCommandHandler(
+        ITaskRepository taskRepository,
+        IProjectRepository projectRepository,
+        IMapper mapper)
     {
         _taskRepository = taskRepository;
         _projectRepository = projectRepository;
+        _mapper = mapper;
     }
 
     public async Task<TaskDto> Handle(CreateTaskCommand request, CancellationToken cancellationToken)
     {
-        // Ensure the parent project exists before creating a task
+        // Guard: parent project must exist
         _ = await _projectRepository.GetByIdAsync(request.ProjectId)
             ?? throw new KeyNotFoundException($"Project with id '{request.ProjectId}' was not found.");
 
@@ -36,15 +42,6 @@ public class CreateTaskCommandHandler : IRequestHandler<CreateTaskCommand, TaskD
         };
 
         var created = await _taskRepository.AddAsync(task);
-
-        return new TaskDto(
-            created.Id,
-            created.Title,
-            created.Description,
-            created.Status.ToString(),
-            created.Priority.ToString(),
-            created.DueDate,
-            created.CreatedAt,
-            created.ProjectId);
+        return _mapper.Map<TaskDto>(created);
     }
 }

@@ -22,15 +22,16 @@ public class GlobalExceptionHandler : IExceptionHandler
 
         var (statusCode, title) = exception switch
         {
-            ValidationException => (StatusCodes.Status400BadRequest, "Validation Error"),
-            KeyNotFoundException => (StatusCodes.Status404NotFound, "Not Found"),
-            _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred")
+            ValidationException           => (StatusCodes.Status400BadRequest,          "Validation Error"),
+            KeyNotFoundException           => (StatusCodes.Status404NotFound,            "Not Found"),
+            UnauthorizedAccessException   => (StatusCodes.Status401Unauthorized,         "Unauthorized"),
+            _                             => (StatusCodes.Status500InternalServerError,  "An unexpected error occurred")
         };
 
         var problemDetails = new ProblemDetails
         {
             Status = statusCode,
-            Title = title,
+            Title  = title,
             Detail = exception.Message
         };
 
