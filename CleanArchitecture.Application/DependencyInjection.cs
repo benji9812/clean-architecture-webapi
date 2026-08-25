@@ -10,7 +10,7 @@ public static class DependencyInjection
     public static IServiceCollection AddApplication(this IServiceCollection services)
     {
         // AutoMapper – pass the marker type; AutoMapper scans that assembly for Profiles
-        services.AddAutoMapper(typeof(AssemblyReference));
+        services.AddAutoMapper(cfg => cfg.AddMaps(typeof(AssemblyReference).Assembly));
 
         // MediatR – scans this assembly for all IRequestHandler<> implementations
         services.AddMediatR(cfg =>
