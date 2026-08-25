@@ -1,12 +1,13 @@
 namespace CleanArchitecture.Application.DTOs;
 
-public record TaskDto(
-    Guid Id,
-    string Title,
-    string? Description,
-    string Status,
-    string Priority,
-    DateTime? DueDate,
-    DateTime CreatedAt,
-    Guid ProjectId
-);
+public record TaskDto
+{
+    public Guid Id { get; init; }
+    public string Title { get; init; } = string.Empty;
+    public string? Description { get; init; }
+    public string Status { get; init; } = string.Empty;
+    public string Priority { get; init; } = string.Empty;
+    public DateTime? DueDate { get; init; }
+    public DateTime CreatedAt { get; init; }
+    public Guid ProjectId { get; init; }
+}
