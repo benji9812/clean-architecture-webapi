@@ -1,0 +1,229 @@
+name: Build, Migrate & Smoke Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: ${{ secrets.CI_SQL_SA_PASSWORD }}
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P '${{ secrets.CI_SQL_SA_PASSWORD }}' -Q 'SELECT 1'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build solution (Release)
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Run unit tests (if any test project exists)
+        run: |
+          if find . -name "*.Tests.csproj" -o -name "*Tests.csproj" | grep -q .; then
+            dotnet test --configuration Release --no-build --verbosity normal
+          else
+            echo "No test project found — skipping unit tests."
+          fi
+
+      - name: Start API in background
+        working-directory: CleanArchitecture.API
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+          ASPNETCORE_URLS: "http://localhost:5250"
+          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=CleanArchitectureDb;User Id=sa;Password=${{ secrets.CI_SQL_SA_PASSWORD }};TrustServerCertificate=True;"
+          JwtSettings__SecretKey: ${{ secrets.CI_JWT_SECRET }}
+          JwtSettings__Issuer: "CleanArchitectureApi"
+          JwtSettings__Audience: "CleanArchitectureApi"
+          TestUsers__0__Username: "admin"
+          TestUsers__0__Password: ${{ secrets.CI_ADMIN_PASSWORD }}
+          TestUsers__0__Role: "Admin"
+          TestUsers__1__Username: "user"
+          TestUsers__1__Password: ${{ secrets.CI_USER_PASSWORD }}
+          TestUsers__1__Role: "User"
+        run: |
+          nohup dotnet run --configuration Release --no-build > api.log 2>&1 &
+          echo "Waiting for API to become healthy..."
+          API_READY=false
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5250/scalar/v1)
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "301" ] || [ "$STATUS" = "302" ]; then
+              echo "API is up (scalar responded with $STATUS)."
+              API_READY=true
+              break
+            fi
+            echo "Attempt $i: scalar returned $STATUS, retrying..."
+            sleep 2
+          done
+          if [ "$API_READY" != "true" ]; then
+            echo "::error::API did not become ready within timeout."
+            cat api.log
+            exit 1
+          fi
+          sleep 2
+
+      - name: Smoke test — Login as Admin
+        id: login_admin
+        env:
+          ADMIN_PW: ${{ secrets.CI_ADMIN_PASSWORD }}
+        run: |
+          RESPONSE=$(curl -s -X POST http://localhost:5250/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}")
+          echo "Login response received."
+          TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Admin login failed — no token returned."
+            cat CleanArchitecture.API/api.log
+            exit 1
+          fi
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test — Login as User
+        id: login_user
+        env:
+          USER_PW: ${{ secrets.CI_USER_PASSWORD }}
+        run: |
+          RESPONSE=$(curl -s -X POST http://localhost:5250/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"user\",\"password\":\"$USER_PW\"}")
+          TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+          if [ -z "$TOKEN" ]; then
+            echo "::error::User login failed — no token returned."
+            exit 1
+          fi
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test — Login with wrong password should fail
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:5250/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"username":"admin","password":"WrongPassword"}')
+          if [ "$STATUS" != "401" ]; then
+            echo "::error::Expected 401 for wrong password, got $STATUS"
+            exit 1
+          fi
+          echo "OK — wrong password correctly rejected with 401."
+
+      - name: Smoke test — Admin can create a project (expect 201)
+        id: create_project
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:5250/api/projects \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"CI Smoke Test Project","description":"Created by GitHub Actions"}')
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+          echo "Status: $STATUS"
+          if [ "$STATUS" != "201" ]; then
+            echo "::error::Expected 201 Created, got $STATUS. Body: $BODY"
+            cat CleanArchitecture.API/api.log
+            exit 1
+          fi
+          PROJECT_ID=$(echo "$BODY" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test — User cannot create a project (expect 403 RBAC)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:5250/api/projects \
+            -H "Authorization: Bearer ${{ steps.login_user.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"Should be blocked","description":"RBAC test"}')
+          if [ "$STATUS" != "403" ]; then
+            echo "::error::Expected 403 Forbidden for User role, got $STATUS"
+            exit 1
+          fi
+          echo "OK — RBAC correctly blocked User role with 403."
+
+      - name: Smoke test — No token gives 401
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5250/api/projects)
+          if [ "$STATUS" != "401" ]; then
+            echo "::error::Expected 401 Unauthorized without token, got $STATUS"
+            exit 1
+          fi
+          echo "OK — anonymous request correctly rejected with 401."
+
+      - name: Smoke test — Empty name fails validation (expect 400, not 500)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:5250/api/projects \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"","description":"test"}')
+          if [ "$STATUS" != "400" ]; then
+            echo "::error::Expected 400 Bad Request for empty name, got $STATUS (should NOT be 500!)"
+            exit 1
+          fi
+          echo "OK — validation correctly returns 400, not a 500 crash."
+
+      - name: Compute dynamic due date
+        id: due_date
+        run: |
+          DUE_DATE=$(date -u -d "+90 days" +"%Y-%m-%dT00:00:00Z")
+          echo "due_date=$DUE_DATE" >> "$GITHUB_OUTPUT"
+          echo "Using due date: $DUE_DATE"
+
+      - name: Smoke test — Create a task under the project (expect 201)
+        id: create_task
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:5250/api/tasks \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"title\":\"CI Task\",\"description\":\"test\",\"priority\":1,\"dueDate\":\"${{ steps.due_date.outputs.due_date }}\",\"projectId\":\"${{ steps.create_project.outputs.project_id }}\"}")
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+          if [ "$STATUS" != "201" ]; then
+            echo "::error::Expected 201 Created for task, got $STATUS. Body: $BODY"
+            exit 1
+          fi
+          echo "OK — task created and linked to project (1-to-many relation confirmed)."
+
+      - name: Smoke test — GET tasks by project confirms relation
+        run: |
+          RESPONSE=$(curl -s http://localhost:5250/api/tasks/project/${{ steps.create_project.outputs.project_id }} \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}")
+          if ! echo "$RESPONSE" | grep -q "CI Task"; then
+            echo "::error::Task not found under project — relation broken. Response: $RESPONSE"
+            exit 1
+          fi
+          echo "OK — GET confirms task is correctly linked to project."
+
+      - name: Smoke test — Admin can delete project (cascade, expect 204)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE http://localhost:5250/api/projects/${{ steps.create_project.outputs.project_id }} \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}")
+          if [ "$STATUS" != "204" ]; then
+            echo "::error::Expected 204 No Content on delete, got $STATUS"
+            exit 1
+          fi
+          echo "OK — project (and cascaded tasks) deleted successfully."
+
+      - name: Print API logs (always, for debugging)
+        if: always()
+        working-directory: CleanArchitecture.API
+        run: cat api.log || echo "No log file found."
+
+      - name: All smoke tests passed
+        run: echo "✅ Alla end-to-end-tester passerade: login, RBAC, CRUD, relation, validering."
