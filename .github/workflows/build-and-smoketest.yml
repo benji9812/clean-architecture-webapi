@@ -237,4 +237,5 @@ jobs:
         run: cat api.log || echo "No log file found."
 
       - name: All smoke tests passed
-        run: echo "✅ Alla end-to-end-tester passerade: login, RBAC, CRUD, relation, validering."
+        run: |
+          echo "All end-to-end tests passed: login, RBAC, CRUD, relation, validation."
