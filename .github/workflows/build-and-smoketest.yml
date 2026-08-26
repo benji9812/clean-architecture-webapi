@@ -66,18 +66,21 @@ jobs:
         run: |
           nohup dotnet run --configuration Release --no-build > api.log 2>&1 &
           echo "Waiting for API to become healthy..."
+          READY=0
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:5250/api/projects -o /dev/null 2>/dev/null; then
-              echo "API is up (auth-protected endpoint responded)."
-              break
-            fi
-            if curl -s http://localhost:5250/scalar/v1 -o /dev/null; then
-              echo "API is up (scalar responded)."
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5250/api/projects || true)
+            if [ "$CODE" != "000" ]; then
+              READY=1
+              echo "API is up (HTTP $CODE)."
               break
             fi
             sleep 2
           done
-          sleep 3
+          if [ "$READY" -ne 1 ]; then
+            echo "::error::API did not start within timeout."
+            cat api.log || true
+            exit 1
+          fi
 
       - name: Smoke test — Login as Admin
         id: login_admin
