@@ -35,15 +35,15 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore dependencies
-        run: dotnet restore
+        run: dotnet restore CleanArchitecture.slnx
 
       - name: Build solution (Release)
-        run: dotnet build --configuration Release --no-restore
+        run: dotnet build CleanArchitecture.slnx --configuration Release --no-restore
 
       - name: Run unit tests (if any test project exists)
         run: |
           if find . -name "*.Tests.csproj" -o -name "*Tests.csproj" | grep -q .; then
-            dotnet test --configuration Release --no-build --verbosity normal
+            dotnet test CleanArchitecture.slnx --configuration Release --no-build --verbosity normal
           else
             echo "No test project found — skipping unit tests."
           fi
@@ -89,9 +89,10 @@ jobs:
         env:
           ADMIN_PW: ${{ secrets.CI_ADMIN_PASSWORD }}
         run: |
+          LOGIN_PAYLOAD=$(python -c 'import json,os; print(json.dumps({"username":"admin","password":os.environ["ADMIN_PW"]}))')
           RESPONSE=$(curl -s -X POST http://localhost:5250/api/auth/login \
             -H "Content-Type: application/json" \
-            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}")
+            -d "$LOGIN_PAYLOAD")
           echo "Login response received."
           TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
           if [ -z "$TOKEN" ]; then
@@ -106,9 +107,10 @@ jobs:
         env:
           USER_PW: ${{ secrets.CI_USER_PASSWORD }}
         run: |
+          LOGIN_PAYLOAD=$(python -c 'import json,os; print(json.dumps({"username":"user","password":os.environ["USER_PW"]}))')
           RESPONSE=$(curl -s -X POST http://localhost:5250/api/auth/login \
             -H "Content-Type: application/json" \
-            -d "{\"username\":\"user\",\"password\":\"$USER_PW\"}")
+            -d "$LOGIN_PAYLOAD")
           TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
           if [ -z "$TOKEN" ]; then
             echo "::error::User login failed — no token returned."
