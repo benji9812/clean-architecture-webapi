@@ -16,11 +16,11 @@ jobs:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
           ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: "YourStrong!Passw0rd"
+          MSSQL_SA_PASSWORD: ${{ secrets.CI_SQL_SA_PASSWORD }}
         ports:
           - 1433:1433
         options: >-
-          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'YourStrong!Passw0rd' -Q 'SELECT 1'"
+          --health-cmd="/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P '${{ secrets.CI_SQL_SA_PASSWORD }}' -Q 'SELECT 1'"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
@@ -53,15 +53,15 @@ jobs:
         env:
           ASPNETCORE_ENVIRONMENT: Development
           ASPNETCORE_URLS: "http://localhost:5250"
-          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=CleanArchitectureDb;User Id=sa;Password=YourStrong!Passw0rd;TrustServerCertificate=True;"
-          JwtSettings__SecretKey: "CI-Only-Secret-Key-Minimum-32-Characters-Long!"
+          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=CleanArchitectureDb;User Id=sa;Password=${{ secrets.CI_SQL_SA_PASSWORD }};TrustServerCertificate=True;"
+          JwtSettings__SecretKey: ${{ secrets.CI_JWT_SECRET }}
           JwtSettings__Issuer: "CleanArchitectureApi"
           JwtSettings__Audience: "CleanArchitectureApi"
           TestUsers__0__Username: "admin"
-          TestUsers__0__Password: "CiAdminPass123!"
+          TestUsers__0__Password: ${{ secrets.CI_ADMIN_PASSWORD }}
           TestUsers__0__Role: "Admin"
           TestUsers__1__Username: "user"
-          TestUsers__1__Password: "CiUserPass123!"
+          TestUsers__1__Password: ${{ secrets.CI_USER_PASSWORD }}
           TestUsers__1__Role: "User"
         run: |
           nohup dotnet run --configuration Release --no-build > api.log 2>&1 &
@@ -81,11 +81,13 @@ jobs:
 
       - name: Smoke test — Login as Admin
         id: login_admin
+        env:
+          ADMIN_PW: ${{ secrets.CI_ADMIN_PASSWORD }}
         run: |
           RESPONSE=$(curl -s -X POST http://localhost:5250/api/auth/login \
             -H "Content-Type: application/json" \
-            -d '{"username":"admin","password":"CiAdminPass123!"}')
-          echo "Login response: $RESPONSE"
+            -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PW\"}")
+          echo "Login response received."
           TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
           if [ -z "$TOKEN" ]; then
             echo "::error::Admin login failed — no token returned."
@@ -96,10 +98,12 @@ jobs:
 
       - name: Smoke test — Login as User
         id: login_user
+        env:
+          USER_PW: ${{ secrets.CI_USER_PASSWORD }}
         run: |
           RESPONSE=$(curl -s -X POST http://localhost:5250/api/auth/login \
             -H "Content-Type: application/json" \
-            -d '{"username":"user","password":"CiUserPass123!"}')
+            -d "{\"username\":\"user\",\"password\":\"$USER_PW\"}")
           TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
           if [ -z "$TOKEN" ]; then
             echo "::error::User login failed — no token returned."
@@ -127,7 +131,7 @@ jobs:
             -d '{"name":"CI Smoke Test Project","description":"Created by GitHub Actions"}')
           BODY=$(echo "$RESPONSE" | head -n -1)
           STATUS=$(echo "$RESPONSE" | tail -n 1)
-          echo "Status: $STATUS, Body: $BODY"
+          echo "Status: $STATUS"
           if [ "$STATUS" != "201" ]; then
             echo "::error::Expected 201 Created, got $STATUS. Body: $BODY"
             cat CleanArchitecture.API/api.log
