@@ -67,10 +67,13 @@ jobs:
 
       - name: Verify SQL Server login actually works
         run: |
-          docker run --rm --network host \
-            -e SQLCMDPASSWORD="${{ secrets.CI_SQL_SA_PASSWORD }}" \
-            mcr.microsoft.com/mssql-tools18 \
-            /opt/mssql-tools18/bin/sqlcmd -S 127.0.0.1,1433 -U sa -C -Q "SELECT 1" \
+          CONTAINER_ID=$(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server:2022-latest" -q | head -n1)
+          if [ -z "$CONTAINER_ID" ]; then
+            echo "::error::Could not find running SQL Server service container via docker ps."
+            exit 1
+          fi
+          echo "Found SQL Server container: $CONTAINER_ID"
+          docker exec "$CONTAINER_ID" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "${{ secrets.CI_SQL_SA_PASSWORD }}" -C -Q "SELECT 1" \
             || { echo "::error::SQL Server login failed. Check that CI_SQL_SA_PASSWORD meets SQL Server's complexity policy (8+ chars, at least 3 of: uppercase, lowercase, digit, symbol)."; exit 1; }
           echo "OK — SQL Server login verified."
 
