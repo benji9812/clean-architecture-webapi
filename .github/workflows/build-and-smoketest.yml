@@ -27,6 +27,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify required secrets are set
+        run: |
+          missing=0
+          for name in CI_SQL_SA_PASSWORD CI_JWT_SECRET CI_ADMIN_PASSWORD CI_USER_PASSWORD; do
+            value="${!name}"
+            if [ -z "$value" ]; then
+              echo "::error::Secret $name is EMPTY or missing under Settings -> Secrets and variables -> Actions."
+              missing=1
+            else
+              echo "$name is set (length: ${#value})"
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            exit 1
+          fi
+        env:
+          CI_SQL_SA_PASSWORD: ${{ secrets.CI_SQL_SA_PASSWORD }}
+          CI_JWT_SECRET: ${{ secrets.CI_JWT_SECRET }}
+          CI_ADMIN_PASSWORD: ${{ secrets.CI_ADMIN_PASSWORD }}
+          CI_USER_PASSWORD: ${{ secrets.CI_USER_PASSWORD }}
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -43,6 +64,15 @@ jobs:
             sleep 2
           done
           sleep 5
+
+      - name: Verify SQL Server login actually works
+        run: |
+          docker run --rm --network host \
+            -e SQLCMDPASSWORD="${{ secrets.CI_SQL_SA_PASSWORD }}" \
+            mcr.microsoft.com/mssql-tools18 \
+            /opt/mssql-tools18/bin/sqlcmd -S 127.0.0.1,1433 -U sa -C -Q "SELECT 1" \
+            || { echo "::error::SQL Server login failed. Check that CI_SQL_SA_PASSWORD meets SQL Server's complexity policy (8+ chars, at least 3 of: uppercase, lowercase, digit, symbol)."; exit 1; }
+          echo "OK — SQL Server login verified."
 
       - name: Restore dependencies
         run: dotnet restore CleanArchitecture.slnx
@@ -75,9 +105,24 @@ jobs:
           TestUsers__1__Role: "User"
         run: |
           nohup dotnet run --configuration Release --no-build > api.log 2>&1 &
+          API_PID=$!
+          echo "Started dotnet run with PID $API_PID"
+
+          sleep 3
+          if ! kill -0 "$API_PID" 2>/dev/null; then
+            echo "::error::dotnet run process died within 3 seconds of starting. Here is api.log:"
+            cat api.log
+            exit 1
+          fi
+
           echo "Waiting for API to become healthy..."
           API_READY=false
           for i in $(seq 1 30); do
+            if ! kill -0 "$API_PID" 2>/dev/null; then
+              echo "::error::dotnet run process died during readiness wait (attempt $i). Here is api.log:"
+              cat api.log
+              exit 1
+            fi
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5250/scalar/v1 || true)
             if [ "$STATUS" = "200" ] || [ "$STATUS" = "301" ] || [ "$STATUS" = "302" ]; then
               echo "API is up (scalar responded with $STATUS)."
