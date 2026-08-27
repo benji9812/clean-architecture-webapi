@@ -161,3 +161,19 @@ All errors return RFC 7807 `ProblemDetails`:
   ]
 }
 ```
+
+## CI / Automated Smoke Tests
+
+The workflow is named **Build, Migrate & Smoke Test** and lives at `.github/workflows/build-and-smoketest.yml`.
+
+It triggers automatically on every push and pull request targeting `main` (and can also be run manually via `workflow_dispatch`).
+
+It spins up a disposable SQL Server container, builds the solution, runs the API, and executes an end-to-end smoke test suite covering: authentication (Admin + User login), rejection of invalid credentials (401), JWT + role-based access control (Admin vs. User, 403 for unauthorized role), full CRUD on Project and Task entities, the Project → Task one-to-many relationship, input validation (400 instead of a 500 crash on empty name), and cleanup (cascade delete).
+
+Required GitHub repository secrets by name only (Settings → Secrets and variables → Actions):
+- `CI_SQL_SA_PASSWORD`
+- `CI_JWT_SECRET`
+- `CI_ADMIN_PASSWORD`
+- `CI_USER_PASSWORD`
+
+Anyone can see the live pass/fail status under the repo's Actions tab.
