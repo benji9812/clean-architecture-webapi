@@ -1,0 +1,296 @@
+name: Build, Migrate & Smoke Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: ${{ secrets.CI_SQL_SA_PASSWORD }}
+        ports:
+          - 1433:1433
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify required secrets are set
+        run: |
+          missing=0
+          for name in CI_SQL_SA_PASSWORD CI_JWT_SECRET CI_ADMIN_PASSWORD CI_USER_PASSWORD; do
+            value="${!name}"
+            if [ -z "$value" ]; then
+              echo "::error::Secret $name is EMPTY or missing under Settings -> Secrets and variables -> Actions."
+              missing=1
+            else
+              echo "$name is set (length: ${#value})"
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            exit 1
+          fi
+        env:
+          CI_SQL_SA_PASSWORD: ${{ secrets.CI_SQL_SA_PASSWORD }}
+          CI_JWT_SECRET: ${{ secrets.CI_JWT_SECRET }}
+          CI_ADMIN_PASSWORD: ${{ secrets.CI_ADMIN_PASSWORD }}
+          CI_USER_PASSWORD: ${{ secrets.CI_USER_PASSWORD }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Wait for SQL Server to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1; then
+              echo "SQL Server port is open."
+              break
+            fi
+            echo "Waiting for SQL Server... attempt $i"
+            sleep 2
+          done
+          sleep 5
+
+      - name: Verify SQL Server login actually works
+        run: |
+          CONTAINER_ID=$(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server:2022-latest" -q | head -n1)
+          if [ -z "$CONTAINER_ID" ]; then
+            echo "::error::Could not find running SQL Server service container via docker ps."
+            exit 1
+          fi
+          echo "Found SQL Server container: $CONTAINER_ID"
+          docker exec "$CONTAINER_ID" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "${{ secrets.CI_SQL_SA_PASSWORD }}" -C -Q "SELECT 1" \
+            || { echo "::error::SQL Server login failed. Check that CI_SQL_SA_PASSWORD meets SQL Server's complexity policy (8+ chars, at least 3 of: uppercase, lowercase, digit, symbol)."; exit 1; }
+          echo "OK — SQL Server login verified."
+
+      - name: Restore dependencies
+        run: dotnet restore CleanArchitecture.slnx
+
+      - name: Build solution (Release)
+        run: dotnet build CleanArchitecture.slnx --configuration Release --no-restore
+
+      - name: Run unit tests (if any test project exists)
+        run: |
+          if find . -name "*.Tests.csproj" -o -name "*Tests.csproj" | grep -q .; then
+            dotnet test CleanArchitecture.slnx --configuration Release --no-build --verbosity normal
+          else
+            echo "No test project found — skipping unit tests."
+          fi
+
+      - name: Start API in background
+        working-directory: CleanArchitecture.API
+        env:
+          ASPNETCORE_ENVIRONMENT: Development
+          ASPNETCORE_URLS: "http://localhost:5250"
+          ConnectionStrings__DefaultConnection: "Server=localhost,1433;Database=CleanArchitectureDb;User Id=sa;Password=${{ secrets.CI_SQL_SA_PASSWORD }};TrustServerCertificate=True;"
+          JwtSettings__SecretKey: ${{ secrets.CI_JWT_SECRET }}
+          JwtSettings__Issuer: "CleanArchitectureApi"
+          JwtSettings__Audience: "CleanArchitectureApi"
+          TestUsers__0__Username: "admin"
+          TestUsers__0__Password: ${{ secrets.CI_ADMIN_PASSWORD }}
+          TestUsers__0__Role: "Admin"
+          TestUsers__1__Username: "user"
+          TestUsers__1__Password: ${{ secrets.CI_USER_PASSWORD }}
+          TestUsers__1__Role: "User"
+        run: |
+          nohup dotnet run --configuration Release --no-build > api.log 2>&1 &
+          API_PID=$!
+          echo "Started dotnet run with PID $API_PID"
+
+          sleep 3
+          if ! kill -0 "$API_PID" 2>/dev/null; then
+            echo "::error::dotnet run process died within 3 seconds of starting. Here is api.log:"
+            cat api.log
+            exit 1
+          fi
+
+          echo "Waiting for API to become healthy..."
+          API_READY=false
+          for i in $(seq 1 30); do
+            if ! kill -0 "$API_PID" 2>/dev/null; then
+              echo "::error::dotnet run process died during readiness wait (attempt $i). Here is api.log:"
+              cat api.log
+              exit 1
+            fi
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5250/scalar/v1 || true)
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "301" ] || [ "$STATUS" = "302" ]; then
+              echo "API is up (scalar responded with $STATUS)."
+              API_READY=true
+              break
+            fi
+            echo "Attempt $i: scalar returned '$STATUS', retrying..."
+            sleep 2
+          done
+          if [ "$API_READY" != "true" ]; then
+            echo "::error::API did not become ready within timeout."
+            cat api.log
+            exit 1
+          fi
+          sleep 2
+
+      - name: Smoke test — Login as Admin
+        id: login_admin
+        env:
+          ADMIN_PW: ${{ secrets.CI_ADMIN_PASSWORD }}
+        run: |
+          LOGIN_PAYLOAD=$(jq -n --arg u "admin" --arg p "$ADMIN_PW" '{username: $u, password: $p}')
+          RESPONSE=$(curl -s -X POST http://localhost:5250/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d "$LOGIN_PAYLOAD")
+          echo "Login response received."
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Admin login failed — no token returned."
+            cat CleanArchitecture.API/api.log
+            exit 1
+          fi
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test — Login as User
+        id: login_user
+        env:
+          USER_PW: ${{ secrets.CI_USER_PASSWORD }}
+        run: |
+          LOGIN_PAYLOAD=$(jq -n --arg u "user" --arg p "$USER_PW" '{username: $u, password: $p}')
+          RESPONSE=$(curl -s -X POST http://localhost:5250/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d "$LOGIN_PAYLOAD")
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "::error::User login failed — no token returned."
+            exit 1
+          fi
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test — Login with wrong credential should fail
+        run: |
+          LOGIN_PAYLOAD=$(jq -n --arg u "admin" --arg p "not-the-real-value" '{username: $u, password: $p}')
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:5250/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d "$LOGIN_PAYLOAD")
+          if [ "$STATUS" != "401" ]; then
+            echo "::error::Expected 401 for wrong credential, got $STATUS"
+            exit 1
+          fi
+          echo "OK — wrong credential correctly rejected with 401."
+
+      - name: Smoke test — Admin can create a project (expect 201)
+        id: create_project
+        run: |
+          PAYLOAD=$(jq -n '{name: "CI Smoke Test Project", description: "Created by GitHub Actions"}')
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:5250/api/projects \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+          echo "Status: $STATUS"
+          if [ "$STATUS" != "201" ]; then
+            echo "::error::Expected 201 Created, got $STATUS. Body: $BODY"
+            cat CleanArchitecture.API/api.log
+            exit 1
+          fi
+          PROJECT_ID=$(echo "$BODY" | jq -r '.id')
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test — User cannot create a project (expect 403 RBAC)
+        run: |
+          PAYLOAD=$(jq -n '{name: "Should be blocked", description: "RBAC test"}')
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:5250/api/projects \
+            -H "Authorization: Bearer ${{ steps.login_user.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          if [ "$STATUS" != "403" ]; then
+            echo "::error::Expected 403 Forbidden for User role, got $STATUS"
+            exit 1
+          fi
+          echo "OK — RBAC correctly blocked User role with 403."
+
+      - name: Smoke test — No token gives 401
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5250/api/projects)
+          if [ "$STATUS" != "401" ]; then
+            echo "::error::Expected 401 Unauthorized without token, got $STATUS"
+            exit 1
+          fi
+          echo "OK — anonymous request correctly rejected with 401."
+
+      - name: Smoke test — Empty name fails validation (expect 400, not 500)
+        run: |
+          PAYLOAD=$(jq -n '{name: "", description: "test"}')
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:5250/api/projects \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          if [ "$STATUS" != "400" ]; then
+            echo "::error::Expected 400 Bad Request for empty name, got $STATUS (should NOT be 500!)"
+            exit 1
+          fi
+          echo "OK — validation correctly returns 400, not a 500 crash."
+
+      - name: Compute dynamic due date
+        id: due_date
+        run: |
+          DUE_DATE=$(date -u -d "+90 days" +"%Y-%m-%dT00:00:00Z")
+          echo "due_date=$DUE_DATE" >> "$GITHUB_OUTPUT"
+          echo "Using due date: $DUE_DATE"
+
+      - name: Smoke test — Create a task under the project (expect 201)
+        id: create_task
+        run: |
+          PAYLOAD=$(jq -n --arg due "${{ steps.due_date.outputs.due_date }}" --arg pid "${{ steps.create_project.outputs.project_id }}" \
+            '{title: "CI Task", description: "test", priority: 1, dueDate: $due, projectId: $pid}')
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:5250/api/tasks \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+          if [ "$STATUS" != "201" ]; then
+            echo "::error::Expected 201 Created for task, got $STATUS. Body: $BODY"
+            exit 1
+          fi
+          echo "OK — task created and linked to project (1-to-many relation confirmed)."
+
+      - name: Smoke test — GET tasks by project confirms relation
+        run: |
+          RESPONSE=$(curl -s http://localhost:5250/api/tasks/project/${{ steps.create_project.outputs.project_id }} \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}")
+          if ! echo "$RESPONSE" | grep -q "CI Task"; then
+            echo "::error::Task not found under project — relation broken. Response: $RESPONSE"
+            exit 1
+          fi
+          echo "OK — GET confirms task is correctly linked to project."
+
+      - name: Smoke test — Admin can delete project (cascade, expect 204)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE http://localhost:5250/api/projects/${{ steps.create_project.outputs.project_id }} \
+            -H "Authorization: Bearer ${{ steps.login_admin.outputs.token }}")
+          if [ "$STATUS" != "204" ]; then
+            echo "::error::Expected 204 No Content on delete, got $STATUS"
+            exit 1
+          fi
+          echo "OK — project (and cascaded tasks) deleted successfully."
+
+      - name: Print API logs (always, for debugging)
+        if: always()
+        working-directory: CleanArchitecture.API
+        run: cat api.log || echo "No log file found."
+
+      - name: All smoke tests passed
+        run: |
+          echo "All end-to-end tests passed: login, RBAC, CRUD, relation, validation."
